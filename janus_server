@@ -1,0 +1,83 @@
+FROM ubuntu:jammy AS base
+RUN dpkg --print-architecture > /tmp/architecture
+
+SHELL [ "/bin/bash", "-c" ]
+
+
+
+# Second stage: install packages
+FROM ubuntu:jammy
+COPY --from=base /tmp/architecture /tmp/
+RUN if [ "$(cat /tmp/architecture)" = "amd64" ]; then \
+      echo "Installing for amd64" && \
+      apt-get update && \
+      apt -y install apt-transport-https ca-certificates curl software-properties-common && \
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add - && \
+      add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable" && \
+      apt-get -y install docker-ce python3-pip sqlite3; \
+    elif [ "$(cat /tmp/architecture)" = "arm64" ]; then \
+      echo "Installing for arm64" && \
+      apt-get update && \
+      apt -y install apt-transport-https ca-certificates curl software-properties-common && \
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add - && \
+      add-apt-repository "deb [arch=arm64] https://download.docker.com/linux/ubuntu jammy stable" && \
+      apt-get -y install docker-ce python3-pip sqlite3; \
+    else \
+      echo "Unsupported architecture"; \
+      exit 1; \
+    fi
+
+RUN apt update && apt install -y libmicrohttpd-dev libjansson-dev \
+    libssl-dev libsofia-sip-ua-dev libglib2.0-dev \
+    libopus-dev libogg-dev libcurl4-openssl-dev liblua5.3-dev \
+    libspeexdsp-dev libconfig-dev pkg-config libtool automake
+
+
+RUN apt update && apt install -y meson ninja-build
+
+
+RUN git clone https://gitlab.freedesktop.org/libnice/libnice  && cd libnice && \
+    meson --prefix=/usr build && ninja -C build &&  ninja -C build install && cd /
+
+RUN apt update && apt install -y libcurl4-openssl-dev wget build-essential cmake
+
+RUN wget https://github.com/cisco/libsrtp/archive/refs/tags/v2.5.0.tar.gz && \
+    tar xfv v2.5.0.tar.gz && \
+    cd libsrtp-2.5.0 && \
+    ./configure --prefix=/usr --enable-openssl  && \
+    make shared_library && make install && cd /
+
+RUN git clone https://github.com/warmcat/libwebsockets.git && \
+    cd libwebsockets && git checkout v4.3-stable && \
+    mkdir build && cd build  && cmake -DLWS_MAX_SMP=1 -DLWS_WITHOUT_EXTENSIONS=0 -DCMAKE_INSTALL_PREFIX:PATH=/usr -DCMAKE_C_FLAGS="-fpic" .. && \
+    make && make install && cd /
+
+
+RUN git clone https://github.com/eclipse/paho.mqtt.c.git && \
+    cd paho.mqtt.c && \
+    make &&  make install && cd /
+
+RUN git clone https://github.com/meetecho/janus-gateway.git && \
+    cd janus-gateway &&  sh autogen.sh && ./configure --prefix=/opt/janus && make && make install && make configs
+
+# RUN cd /opt/janus &&  ./bin/janus
+
+RUN apt install -y nginx && cd /janus-gateway && cp -a html/* /var/www/html 
+
+RUN apt-get install -y ssl-cert  && make-ssl-cert generate-default-snakeoil
+
+# # Modify Nginx configuration to use the generated self-signed certificate
+RUN sed -i 's/# listen 443 ssl default_server;/listen 443 ssl default_server;/' /etc/nginx/sites-available/default \
+ && sed -i 's/# listen \[::\]:443 ssl default_server;/listen \[::\]:443 ssl default_server;/' /etc/nginx/sites-available/default \
+ && sed -i 's/# include snippets\/snakeoil.conf;/include snippets\/snakeoil.conf;/' /etc/nginx/sites-available/default
+
+EXPOSE 443
+# Enable HTTPS in Janus' HTTP transport config
+RUN sed -i 's/^https = false/https = true/' /opt/janus/etc/janus/janus.transport.http.jcfg \
+ && sed -i 's/^#secure_port = 8089/secure_port = 8089/' /opt/janus/etc/janus/janus.transport.http.jcfg \
+ && sed -i 's|^#cert_pem =.*|cert_pem = "/etc/ssl/certs/ssl-cert-snakeoil.pem"|' /opt/janus/etc/janus/janus.transport.http.jcfg \
+ && sed -i 's|^#cert_key =.*|cert_key = "/etc/ssl/private/ssl-cert-snakeoil.key"|' /opt/janus/etc/janus/janus.transport.http.jcfg
+
+
+# # Expose the HTTPS port of Janus
+EXPOSE 8089
